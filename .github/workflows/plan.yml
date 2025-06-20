@@ -1,0 +1,273 @@
+name: 📋 Terraform Plan
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+      working_directory:
+        description: 'Working directory for Terraform'
+        required: false
+        type: string
+        default: '.'
+      terraform_version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.6.0'
+      upload_plan:
+        description: 'Upload plan as artifact'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      plan_artifact_name:
+        description: 'Name of the uploaded plan artifact'
+        value: ${{ jobs.plan.outputs.plan_artifact_name }}
+      has_changes:
+        description: 'Whether the plan has changes'
+        value: ${{ jobs.plan.outputs.has_changes }}
+      plan_summary:
+        description: 'Summary of the plan'
+        value: ${{ jobs.plan.outputs.plan_summary }}
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  TF_VAR_environment: ${{ inputs.environment }}
+
+jobs:
+  plan:
+    name: 📋 Plan Infrastructure
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ inputs.environment }}
+    outputs:
+      plan_artifact_name: ${{ steps.upload-plan.outputs.artifact-name }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      plan_summary: ${{ steps.plan.outputs.plan_summary }}
+    
+    steps:
+      - name: 🔄 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      
+      # - name: 🔑 Configure AWS Credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      #     mask-aws-account-id: false
+
+
+      - name: OIDC Authentication
+        if: github.event_name == 'pull_request'
+        uses: aws-actions/aws-oidc-authentication@v1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: ${{ github.actor }}-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      
+      - name: 📁 Set Working Directory
+        run: |
+          echo "Working directory: ${{ inputs.working_directory }}"
+          if [[ ! -d "${{ inputs.working_directory }}" ]]; then
+            echo "❌ Working directory does not exist"
+            exit 1
+          fi
+      
+      - name: 🏗️ Terraform Init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🏗️ Initializing Terraform..."
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+      
+      - name: 🔍 Terraform Validate
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🔍 Validating Terraform configuration..."
+          terraform validate
+      
+      - name: 🎨 Terraform Format Check
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🎨 Checking Terraform formatting..."
+          if ! terraform fmt -check -recursive; then
+            echo "❌ Terraform files are not properly formatted"
+            echo "Run 'terraform fmt -recursive' to fix formatting issues"
+            exit 1
+          fi
+          echo "✅ All files are properly formatted"
+      
+      - name: 🔒 Security Scan with tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          soft_fail: true
+          format: sarif
+          output: tfsec-results.sarif
+      
+      - name: 📤 Upload tfsec results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec-results.sarif
+      
+      - name: 📋 Create Terraform Plan
+        id: plan
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "📋 Creating Terraform plan..."
+          
+          # Create plan file with timestamp
+          PLAN_FILE="tfplan-${{ inputs.environment }}-$(date +%Y%m%d-%H%M%S)"
+          echo "plan_file=$PLAN_FILE" >> $GITHUB_OUTPUT
+          
+          # Run terraform plan and capture output
+          set +e
+          terraform plan \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -out="$PLAN_FILE" \
+            -detailed-exitcode \
+            -no-color > plan_output.txt 2>&1
+          PLAN_EXIT_CODE=$?
+          set -e
+          
+          # Check plan results
+          if [[ $PLAN_EXIT_CODE -eq 0 ]]; then
+            echo "✅ No changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "plan_summary=No changes detected" >> $GITHUB_OUTPUT
+          elif [[ $PLAN_EXIT_CODE -eq 2 ]]; then
+            echo "📝 Changes detected"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            
+            # Extract summary from plan
+            SUMMARY=$(terraform show -no-color "$PLAN_FILE" | grep -E "Plan:|No changes" || echo "Changes detected")
+            echo "plan_summary=$SUMMARY" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Terraform plan failed"
+            cat plan_output.txt
+            exit $PLAN_EXIT_CODE
+          fi
+          
+          # Display plan output
+          echo "## 📋 Terraform Plan Output" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat plan_output.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # Also output to step
+          cat plan_output.txt
+      
+      - name: 💾 Save Plan Details
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          # Create plan summary file
+          cat > plan_summary.json << EOF
+          {
+            "environment": "${{ inputs.environment }}",
+            "terraform_version": "${{ inputs.terraform_version }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "actor": "${{ github.actor }}",
+            "has_changes": "${{ steps.plan.outputs.has_changes }}",
+            "plan_file": "${{ steps.plan.outputs.plan_file }}",
+            "workflow_run": "${{ github.run_id }}"
+          }
+          EOF
+          
+          # Display summary
+          echo "📊 Plan Summary:"
+          cat plan_summary.json | jq .
+      
+      - name: 📤 Upload Plan Artifact
+        id: upload-plan
+        if: inputs.upload_plan && steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
+          path: |
+            ${{ inputs.working_directory }}/${{ steps.plan.outputs.plan_file }}
+            ${{ inputs.working_directory }}/plan_summary.json
+            ${{ inputs.working_directory }}/plan_output.txt
+          retention-days: 30
+          if-no-files-found: error
+      
+      - name: 💬 Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Read plan output
+            const planOutput = fs.readFileSync(path.join('${{ inputs.working_directory }}', 'plan_output.txt'), 'utf8');
+            const hasChanges = '${{ steps.plan.outputs.has_changes }}' === 'true';
+            const environment = '${{ inputs.environment }}';
+            
+            const comment = `## 📋 Terraform Plan Results - ${environment}
+            
+            **Environment:** \`${environment}\`
+            **Has Changes:** ${hasChanges ? '✅ Yes' : '❌ No'}
+            **Terraform Version:** \`${{ inputs.terraform_version }}\`
+            **Working Directory:** \`${{ inputs.working_directory }}\`
+            
+            <details>
+            <summary>📄 Plan Output</summary>
+            
+            \`\`\`hcl
+            ${planOutput.slice(0, 60000)} ${planOutput.length > 60000 ? '\n... (truncated)' : ''}
+            \`\`\`
+            
+            </details>
+            
+            ${hasChanges ? '🚀 Ready for apply!' : '✨ No changes needed!'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+      
+      - name: 📊 Job Summary
+        if: always()
+        run: |
+          echo "## 📋 Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Working Directory | ${{ inputs.working_directory }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform Version | ${{ inputs.terraform_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Has Changes | ${{ steps.plan.outputs.has_changes }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Plan Artifact | ${{ steps.upload-plan.outputs.artifact-name || 'Not uploaded' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ steps.plan.outputs.has_changes }}" == "true" ]]; then
+            echo "### 🚀 Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review the plan output above" >> $GITHUB_STEP_SUMMARY
+            echo "2. Run the apply workflow with artifact: \`${{ steps.upload-plan.outputs.artifact-name }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✨ No Action Needed" >> $GITHUB_STEP_SUMMARY
+            echo "Infrastructure is up to date!" >> $GITHUB_STEP_SUMMARY
+          fi

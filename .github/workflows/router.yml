@@ -1,0 +1,250 @@
+# .github/workflows/terraform-router.yml
+name: Terraform Router
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      
+      action:
+        description: 'Terraform Action'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+
+      modules:
+        description: 'Terraform Module (optional, used for plan/apply actions)'
+        required: true
+        default: ''
+        type: choice
+        options:
+          - ssm-key-mgmt
+          
+      
+      confirm_destroy:
+        description: 'Type "destroy" to confirm destruction (required for destroy action)'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Job 1: Validate inputs and setup
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    
+    outputs:
+      environment: ${{ github.event.inputs.environment }}
+      action: ${{ github.event.inputs.action }}
+      confirm_destroy: ${{ github.event.inputs.confirm_destroy }}
+    
+    steps:
+      - name: Validate Destroy Confirmation
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          if [[ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]]; then
+            echo "❌ Destroy action requires confirmation. You must type 'destroy' in the confirm_destroy field."
+            exit 1
+          fi
+          echo "✅ Destroy confirmation validated"
+
+      - name: Display Action Summary
+        run: |
+          echo "🎯 Router Workflow Starting"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Action: ${{ github.event.inputs.action }}"
+          echo "Triggered by: @${{ github.actor }}"
+
+  # Job 2: Route to Plan workflow
+  route-to-plan:
+    name: Execute Plan
+    needs: validate
+    if: github.event.inputs.action == 'plan'
+    uses: ./.github/workflows/plan.yml
+    with:
+      environment: ${{ needs.validate.outputs.environment }}
+    secrets: inherit
+
+  # Job 3: Route to Apply workflow
+  route-to-apply:
+    name: Execute Apply
+    needs: validate
+    if: github.event.inputs.action == 'apply'
+    uses: ./.github/workflows/apply.yml
+    with:
+      environment: ${{ needs.validate.outputs.environment }}
+    secrets: inherit
+
+  # Job 4: Route to Destroy workflow
+  route-to-destroy:
+    name: Execute Destroy
+    needs: validate
+    if: github.event.inputs.action == 'destroy'
+    uses: ./.github/workflows/destroy.yml
+    with:
+      environment: ${{ needs.validate.outputs.environment }}
+      confirm_destroy: ${{ needs.validate.outputs.confirm_destroy }}
+    secrets: inherit
+
+  # Job 5: Summary and notification
+  summary:
+    name: Workflow Summary
+    runs-on: ubuntu-latest
+    needs: [validate, route-to-plan, route-to-apply, route-to-destroy]
+    if: always()
+    
+    steps:
+      - name: Determine Overall Status
+        id: status
+        run: |
+          ACTION="${{ needs.validate.outputs.action }}"
+          
+          case "$ACTION" in
+            plan)
+              if [[ "${{ needs.route-to-plan.result }}" == "success" ]]; then
+                echo "status=✅ PLAN COMPLETED" >> $GITHUB_OUTPUT
+                echo "color=good" >> $GITHUB_OUTPUT
+              else
+                echo "status=❌ PLAN FAILED" >> $GITHUB_OUTPUT
+                echo "color=danger" >> $GITHUB_OUTPUT
+              fi
+              ;;
+            apply)
+              if [[ "${{ needs.route-to-apply.result }}" == "success" ]]; then
+                echo "status=✅ APPLY COMPLETED" >> $GITHUB_OUTPUT
+                echo "color=good" >> $GITHUB_OUTPUT
+              else
+                echo "status=❌ APPLY FAILED" >> $GITHUB_OUTPUT
+                echo "color=danger" >> $GITHUB_OUTPUT
+              fi
+              ;;
+            destroy)
+              if [[ "${{ needs.route-to-destroy.result }}" == "success" ]]; then
+                echo "status=🗑️ DESTROY COMPLETED" >> $GITHUB_OUTPUT
+                echo "color=warning" >> $GITHUB_OUTPUT
+              else
+                echo "status=❌ DESTROY FAILED" >> $GITHUB_OUTPUT
+                echo "color=danger" >> $GITHUB_OUTPUT
+              fi
+              ;;
+          esac
+
+      - name: Create Router Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # 🎯 Terraform Router Results
+          
+          **Environment:** `${{ needs.validate.outputs.environment }}`
+          **Action:** `${{ needs.validate.outputs.action }}`
+          **Status:** ${{ steps.status.outputs.status }}
+          **Triggered by:** @${{ github.actor }}
+          
+          ## 📊 Job Results:
+          EOF
+          
+          # Add job-specific results
+          case "${{ needs.validate.outputs.action }}" in
+            plan)
+              cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          - **Validation:** ${{ needs.validate.result }}
+          - **Plan Workflow:** ${{ needs.route-to-plan.result }}
+          
+          ## 📋 Plan Summary:
+          ${{ needs.route-to-plan.outputs.plan_summary || 'Plan summary not available' }}
+          
+          ## 🎯 Next Steps:
+          - Review the plan results in the plan workflow logs
+          - If satisfied with the changes, run this router again with "apply" action
+          - If changes are needed, update your Terraform configuration first
+          EOF
+              ;;
+            apply)
+              cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          - **Validation:** ${{ needs.validate.result }}
+          - **Apply Workflow:** ${{ needs.route-to-apply.result }}
+          
+          ## ✅ Infrastructure Status:
+          ${{ needs.route-to-apply.outputs.apply_status == 'success' && 'Successfully deployed and ready to use!' || 'Deployment failed - check apply workflow logs' }}
+          
+          ${{ needs.route-to-apply.outputs.apply_status == 'success' && '## 🚀 Quick Start:
+          ```bash
+          # Add SSH key
+          aws ssm start-automation-execution \
+              --document-name "ssh-key-mgmt-add-${{ needs.validate.outputs.environment }}" \
+              --parameters '"'"'InstanceIds=["i-123"],PublicKey="ssh-ed25519 AAA...",Username="ec2-user"'"'"'
+          ```' || '' }}
+          EOF
+              ;;
+            destroy)
+              cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          - **Validation:** ${{ needs.validate.result }}
+          - **Destroy Workflow:** ${{ needs.route-to-destroy.result }}
+          
+          ## 🗑️ Destruction Status:
+          ${{ needs.route-to-destroy.outputs.destroy_status == 'success' && 'All infrastructure successfully destroyed' || 'Destruction failed - check destroy workflow logs' }}
+          
+          ${{ needs.route-to-destroy.outputs.destroy_status == 'success' && '## 🔄 To Restore:
+          Run this router again with "apply" action to recreate the infrastructure.' || '' }}
+          EOF
+              ;;
+          esac
+          
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          
+          ## 📋 Workflow Links:
+          - [Plan Workflow](../actions/workflows/plan.yml)
+          - [Apply Workflow](../actions/workflows/apply.yml)  
+          - [Destroy Workflow](../actions/workflows/destroy.yml)
+          - [This Router](../actions/workflows/terraform-router.yml)
+          EOF
+
+      - name: Slack Notification
+        if: always() && secrets.SLACK_WEBHOOK_URL
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "Terraform Router Execution",
+              "color": "${{ steps.status.outputs.color }}",
+              "fields": [
+                {
+                  "title": "Environment",
+                  "value": "${{ needs.validate.outputs.environment }}",
+                  "short": true
+                },
+                {
+                  "title": "Action",
+                  "value": "${{ needs.validate.outputs.action }}",
+                  "short": true
+                },
+                {
+                  "title": "Status",
+                  "value": "${{ steps.status.outputs.status }}",
+                  "short": true
+                },
+                {
+                  "title": "Triggered By",
+                  "value": "@${{ github.actor }}",
+                  "short": true
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

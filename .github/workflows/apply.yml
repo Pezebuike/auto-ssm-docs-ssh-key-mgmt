@@ -1,0 +1,328 @@
+name: 🚀 Terraform Apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+      working_directory:
+        description: 'Working directory for Terraform'
+        required: false
+        type: string
+        default: '.'
+      terraform_version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.6.0'
+      auto_approve:
+        description: 'Auto-approve the apply'
+        required: false
+        type: boolean
+        default: false
+      plan_artifact:
+        description: 'Plan artifact name to use'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      apply_summary:
+        description: 'Summary of the apply operation'
+        value: ${{ jobs.apply.outputs.apply_summary }}
+      resources_created:
+        description: 'Number of resources created'
+        value: ${{ jobs.apply.outputs.resources_created }}
+      resources_updated:
+        description: 'Number of resources updated'
+        value: ${{ jobs.apply.outputs.resources_updated }}
+      resources_destroyed:
+        description: 'Number of resources destroyed'
+        value: ${{ jobs.apply.outputs.resources_destroyed }}
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  TF_VAR_environment: ${{ inputs.environment }}
+
+jobs:
+  # Pre-apply validation and approval
+  pre-apply-checks:
+    name: 🔍 Pre-Apply Validation
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ inputs.environment }}
+    outputs:
+      should_proceed: ${{ steps.validation.outputs.should_proceed }}
+      approval_required: ${{ steps.validation.outputs.approval_required }}
+    
+    steps:
+      - name: 🔄 Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: 🔍 Validate Inputs
+        id: validation
+        run: |
+          echo "🔍 Validating apply inputs..."
+          
+          # Check if environment allows auto-approval
+          APPROVAL_REQUIRED="true"
+          if [[ "${{ inputs.environment }}" == "dev" && "${{ inputs.auto_approve }}" == "true" ]]; then
+            APPROVAL_REQUIRED="false"
+            echo "✅ Auto-approval enabled for dev environment"
+          elif [[ "${{ inputs.environment }}" != "dev" ]]; then
+            echo "⚠️ Production environment detected - manual approval required"
+          fi
+          
+          # Validate plan artifact if provided
+          if [[ -n "${{ inputs.plan_artifact }}" ]]; then
+            echo "📋 Plan artifact provided: ${{ inputs.plan_artifact }}"
+          else
+            echo "⚠️ No plan artifact provided - will create new plan"
+          fi
+          
+          echo "should_proceed=true" >> $GITHUB_OUTPUT
+          echo "approval_required=$APPROVAL_REQUIRED" >> $GITHUB_OUTPUT
+          
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Auto-approve: ${{ inputs.auto_approve }}"
+          echo "Approval required: $APPROVAL_REQUIRED"
+
+  # Manual approval for production environments
+  approval:
+    name: 👥 Manual Approval Required
+    runs-on: ubuntu-latest
+    needs: pre-apply-checks
+    if: needs.pre-apply-checks.outputs.approval_required == 'true'
+    environment: 
+      name: ${{ inputs.environment }}-approval
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    
+    steps:
+      - name: ⏳ Waiting for Approval
+        run: |
+          echo "⏳ Manual approval required for ${{ inputs.environment }} environment"
+          echo "🔐 This step will wait for approval before proceeding"
+          echo "📋 Please review the plan and approve if changes look correct"
+
+  # Main apply job
+  apply:
+    name: 🚀 Apply Infrastructure Changes
+    runs-on: ubuntu-latest
+    needs: [pre-apply-checks, approval]
+    if: always() && (needs.pre-apply-checks.outputs.should_proceed == 'true') && (needs.approval.result == 'success' || needs.approval.result == 'skipped')
+    environment: 
+      name: ${{ inputs.environment }}
+    outputs:
+      apply_summary: ${{ steps.apply.outputs.apply_summary }}
+      resources_created: ${{ steps.apply.outputs.resources_created }}
+      resources_updated: ${{ steps.apply.outputs.resources_updated }}
+      resources_destroyed: ${{ steps.apply.outputs.resources_destroyed }}
+    
+    steps:
+      - name: 🔄 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          mask-aws-account-id: false
+      
+      - name: 📥 Download Plan Artifact
+        if: inputs.plan_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: ${{ inputs.working_directory }}
+      
+      - name: 🏗️ Terraform Init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🏗️ Initializing Terraform..."
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+      
+      - name: 📋 Create Fresh Plan (if no artifact)
+        if: inputs.plan_artifact == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "📋 Creating fresh plan..."
+          PLAN_FILE="tfplan-${{ inputs.environment }}-$(date +%Y%m%d-%H%M%S)"
+          terraform plan \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -out="$PLAN_FILE" \
+            -detailed-exitcode
+          echo "PLAN_FILE=$PLAN_FILE" >> $GITHUB_ENV
+      
+      - name: 🔍 Identify Plan File
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if [[ "${{ inputs.plan_artifact }}" != "" ]]; then
+            # Find the plan file in the downloaded artifact
+            PLAN_FILE=$(find . -name "tfplan-*" -type f | head -1)
+            if [[ -z "$PLAN_FILE" ]]; then
+              echo "❌ No plan file found in artifact"
+              exit 1
+            fi
+            echo "📋 Using plan file from artifact: $PLAN_FILE"
+          else
+            echo "📋 Using freshly created plan: $PLAN_FILE"
+          fi
+          echo "PLAN_FILE=$PLAN_FILE" >> $GITHUB_ENV
+      
+      - name: 📊 Display Plan Summary
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "📊 Plan Summary:"
+          terraform show -no-color "$PLAN_FILE" | head -50
+          echo ""
+          echo "🔍 Full plan details:"
+          terraform show -no-color "$PLAN_FILE"
+      
+      - name: 🚀 Apply Terraform Changes
+        id: apply
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🚀 Applying Terraform changes..."
+          
+          # Create apply log file
+          APPLY_LOG="apply-output-$(date +%Y%m%d-%H%M%S).log"
+          
+          # Apply the plan
+          set +e
+          terraform apply \
+            -no-color \
+            -auto-approve \
+            "$PLAN_FILE" 2>&1 | tee "$APPLY_LOG"
+          APPLY_EXIT_CODE=$?
+          set -e
+          
+          if [[ $APPLY_EXIT_CODE -eq 0 ]]; then
+            echo "✅ Apply completed successfully"
+            
+            # Extract resource counts from output
+            CREATED=$(grep -c "created" "$APPLY_LOG" || echo "0")
+            UPDATED=$(grep -c "modified" "$APPLY_LOG" || echo "0")
+            DESTROYED=$(grep -c "destroyed" "$APPLY_LOG" || echo "0")
+            
+            echo "resources_created=$CREATED" >> $GITHUB_OUTPUT
+            echo "resources_updated=$UPDATED" >> $GITHUB_OUTPUT
+            echo "resources_destroyed=$DESTROYED" >> $GITHUB_OUTPUT
+            echo "apply_summary=Apply completed: $CREATED created, $UPDATED updated, $DESTROYED destroyed" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Apply failed with exit code $APPLY_EXIT_CODE"
+            cat "$APPLY_LOG"
+            echo "apply_summary=Apply failed" >> $GITHUB_OUTPUT
+            exit $APPLY_EXIT_CODE
+          fi
+          
+          # Display apply output in step summary
+          echo "## 🚀 Terraform Apply Results" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat "$APPLY_LOG" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 🔍 Verify Applied State
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🔍 Verifying applied state..."
+          
+          # Show current state
+          terraform show -no-color > current_state.txt
+          
+          # List all resources
+          echo "📦 Resources in state:"
+          terraform state list
+          
+          # Check for any drift
+          echo "🔄 Checking for configuration drift..."
+          terraform plan -var-file="environments/${{ inputs.environment }}.tfvars" -detailed-exitcode > drift_check.txt
+          DRIFT_EXIT_CODE=$?
+          
+          if [[ $DRIFT_EXIT_CODE -eq 0 ]]; then
+            echo "✅ No drift detected - infrastructure matches configuration"
+          elif [[ $DRIFT_EXIT_CODE -eq 2 ]]; then
+            echo "⚠️ Configuration drift detected after apply:"
+            cat drift_check.txt
+          fi
+      
+      - name: 📤 Upload Apply Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-apply-${{ inputs.environment }}-${{ github.run_id }}
+          path: |
+            ${{ inputs.working_directory }}/apply-output-*.log
+            ${{ inputs.working_directory }}/current_state.txt
+            ${{ inputs.working_directory }}/drift_check.txt
+          retention-days: 90
+          if-no-files-found: warn
+      
+      - name: 📱 Notify on Success
+        if: success()
+        run: |
+          echo "🎉 Terraform apply completed successfully for ${{ inputs.environment }}!"
+          echo "📊 Resources created: ${{ steps.apply.outputs.resources_created }}"
+          echo "📊 Resources updated: ${{ steps.apply.outputs.resources_updated }}"
+          echo "📊 Resources destroyed: ${{ steps.apply.outputs.resources_destroyed }}"
+      
+      - name: 📱 Notify on Failure
+        if: failure()
+        run: |
+          echo "❌ Terraform apply failed for ${{ inputs.environment }}!"
+          echo "🔍 Check the logs above for detailed error information"
+          echo "📋 Consider rolling back if necessary"
+
+  # Post-apply summary
+  post-apply:
+    name: 📊 Post-Apply Summary
+    runs-on: ubuntu-latest
+    needs: [apply]
+    if: always()
+    
+    steps:
+      - name: 📊 Generate Summary
+        run: |
+          echo "## 🚀 Terraform Apply Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Working Directory | ${{ inputs.working_directory }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform Version | ${{ inputs.terraform_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auto Approve | ${{ inputs.auto_approve }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Plan Artifact | ${{ inputs.plan_artifact || 'None (fresh plan)' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          APPLY_RESULT="${{ needs.apply.result }}"
+          if [[ "$APPLY_RESULT" == "success" ]]; then
+            echo "### ✅ Apply Results" >> $GITHUB_STEP_SUMMARY
+            echo "- Status: **Success** ✅" >> $GITHUB_STEP_SUMMARY
+            echo "- Resources Created: ${{ needs.apply.outputs.resources_created }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Resources Updated: ${{ needs.apply.outputs.resources_updated }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Resources Destroyed: ${{ needs.apply.outputs.resources_destroyed }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 Infrastructure successfully deployed to **${{ inputs.environment }}**!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Apply Failed" >> $GITHUB_STEP_SUMMARY
+            echo "- Status: **Failed** ❌" >> $GITHUB_STEP_SUMMARY
+            echo "- Result: $APPLY_RESULT" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🔍 Please check the apply job logs for detailed error information." >> $GITHUB_STEP_SUMMARY
+          fi

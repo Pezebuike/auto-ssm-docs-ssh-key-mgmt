@@ -1,0 +1,387 @@
+name: ✅ Terraform Validate
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+      working_directory:
+        description: 'Working directory for Terraform'
+        required: false
+        type: string
+        default: '.'
+      terraform_version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.6.0'
+      run_security_scan:
+        description: 'Run security scanning with tfsec'
+        required: false
+        type: boolean
+        default: true
+      check_formatting:
+        description: 'Check Terraform formatting'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      validation_status:
+        description: 'Overall validation status'
+        value: ${{ jobs.validate.outputs.validation_status }}
+      security_issues:
+        description: 'Number of security issues found'
+        value: ${{ jobs.validate.outputs.security_issues }}
+      format_issues:
+        description: 'Whether formatting issues were found'
+        value: ${{ jobs.validate.outputs.format_issues }}
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  TF_VAR_environment: ${{ inputs.environment }}
+
+jobs:
+  validate:
+    name: ✅ Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      validation_status: ${{ steps.summary.outputs.validation_status }}
+      security_issues: ${{ steps.security.outputs.security_issues }}
+      format_issues: ${{ steps.format.outputs.format_issues }}
+    
+    steps:
+      - name: 🔄 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for some security scanners
+      
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          mask-aws-account-id: false
+      
+      - name: 📁 Validate Working Directory
+        run: |
+          echo "📁 Validating working directory: ${{ inputs.working_directory }}"
+          if [[ ! -d "${{ inputs.working_directory }}" ]]; then
+            echo "❌ Working directory does not exist"
+            exit 1
+          fi
+          
+          # Check for Terraform files
+          if ! find "${{ inputs.working_directory }}" -name "*.tf" -type f | head -1 | grep -q .; then
+            echo "❌ No Terraform files found in working directory"
+            exit 1
+          fi
+          
+          echo "✅ Working directory validation passed"
+      
+      - name: 🏗️ Terraform Init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🏗️ Initializing Terraform..."
+          
+          # Initialize without backend for validation
+          terraform init -backend=false
+          
+          echo "✅ Terraform initialization completed"
+      
+      - name: 🔍 Terraform Validate
+        id: tf-validate
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🔍 Validating Terraform configuration..."
+          
+          # Run terraform validate and capture output
+          if terraform validate -json > validate_output.json; then
+            echo "✅ Terraform validation passed"
+            echo "tf_validate_status=success" >> $GITHUB_OUTPUT
+            
+            # Check for warnings
+            WARNINGS=$(jq -r '.diagnostics[]? | select(.severity == "warning") | .summary' validate_output.json 2>/dev/null || echo "")
+            if [[ -n "$WARNINGS" ]]; then
+              echo "⚠️ Validation warnings found:"
+              echo "$WARNINGS"
+            fi
+          else
+            echo "❌ Terraform validation failed"
+            echo "tf_validate_status=failure" >> $GITHUB_OUTPUT
+            
+            # Display validation errors
+            echo "Validation errors:"
+            jq -r '.diagnostics[]? | select(.severity == "error") | "\(.summary): \(.detail)"' validate_output.json 2>/dev/null || cat validate_output.json
+            exit 1
+          fi
+      
+      - name: 🎨 Terraform Format Check
+        id: format
+        if: inputs.check_formatting
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🎨 Checking Terraform formatting..."
+          
+          # Check formatting recursively
+          FORMAT_OUTPUT=""
+          if ! FORMAT_OUTPUT=$(terraform fmt -check -recursive -diff 2>&1); then
+            echo "❌ Terraform files are not properly formatted"
+            echo "format_issues=true" >> $GITHUB_OUTPUT
+            
+            echo "Formatting issues found:"
+            echo "$FORMAT_OUTPUT"
+            
+            # Show diff for each file
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🎨 Formatting Issues" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`diff" >> $GITHUB_STEP_SUMMARY
+            echo "$FORMAT_OUTPUT" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Run \`terraform fmt -recursive\` to fix these issues." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ All files are properly formatted"
+            echo "format_issues=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 🔒 Security Scan with tfsec
+        id: security
+        if: inputs.run_security_scan
+        working-directory: ${{ inputs.working_directory }}
+        continue-on-error: true
+        run: |
+          echo "🔒 Running security scan with tfsec..."
+          
+          # Install tfsec if not available
+          if ! command -v tfsec &> /dev/null; then
+            echo "📦 Installing tfsec..."
+            curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          fi
+          
+          # Run tfsec scan
+          TFSEC_OUTPUT=""
+          SECURITY_ISSUES=0
+          
+          if TFSEC_OUTPUT=$(tfsec . --format json --soft-fail 2>&1); then
+            # Parse JSON output to count issues
+            if echo "$TFSEC_OUTPUT" | jq empty 2>/dev/null; then
+              SECURITY_ISSUES=$(echo "$TFSEC_OUTPUT" | jq '.results | length' 2>/dev/null || echo "0")
+            else
+              # Fallback if JSON parsing fails
+              SECURITY_ISSUES=$(echo "$TFSEC_OUTPUT" | grep -c "Result #" || echo "0")
+            fi
+          else
+            echo "⚠️ tfsec scan encountered issues"
+            SECURITY_ISSUES="unknown"
+          fi
+          
+          echo "security_issues=$SECURITY_ISSUES" >> $GITHUB_OUTPUT
+          
+          if [[ "$SECURITY_ISSUES" == "0" ]]; then
+            echo "✅ No security issues found"
+          elif [[ "$SECURITY_ISSUES" == "unknown" ]]; then
+            echo "⚠️ Security scan completed with warnings"
+            echo "$TFSEC_OUTPUT"
+          else
+            echo "⚠️ Found $SECURITY_ISSUES potential security issues"
+            echo "$TFSEC_OUTPUT"
+          fi
+          
+          # Save detailed output
+          echo "$TFSEC_OUTPUT" > tfsec_results.json
+      
+      - name: 🔒 Advanced Security Scan with Checkov
+        if: inputs.run_security_scan
+        continue-on-error: true
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🔒 Running advanced security scan with Checkov..."
+          
+          # Install checkov
+          pip install checkov
+          
+          # Run checkov scan
+          checkov -d . --framework terraform --output json --soft-fail > checkov_results.json || true
+          
+          # Parse results
+          CHECKOV_ISSUES=$(jq '.results.failed_checks | length' checkov_results.json 2>/dev/null || echo "0")
+          echo "🔍 Checkov found $CHECKOV_ISSUES potential issues"
+          
+          if [[ "$CHECKOV_ISSUES" != "0" ]]; then
+            echo "⚠️ Checkov security issues summary:"
+            jq -r '.results.failed_checks[] | "- \(.check_name): \(.file_path)"' checkov_results.json 2>/dev/null | head -10
+          fi
+      
+      - name: 📊 Configuration Analysis
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "📊 Analyzing Terraform configuration..."
+          
+          # Count different types of resources
+          RESOURCE_COUNT=$(grep -r "^resource " . --include="*.tf" | wc -l || echo "0")
+          DATA_COUNT=$(grep -r "^data " . --include="*.tf" | wc -l || echo "0")
+          MODULE_COUNT=$(grep -r "^module " . --include="*.tf" | wc -l || echo "0")
+          VARIABLE_COUNT=$(grep -r "^variable " . --include="*.tf" | wc -l || echo "0")
+          OUTPUT_COUNT=$(grep -r "^output " . --include="*.tf" | wc -l || echo "0")
+          
+          echo "📈 Configuration Statistics:"
+          echo "  - Resources: $RESOURCE_COUNT"
+          echo "  - Data sources: $DATA_COUNT"
+          echo "  - Modules: $MODULE_COUNT"
+          echo "  - Variables: $VARIABLE_COUNT"
+          echo "  - Outputs: $OUTPUT_COUNT"
+          
+          # Save stats for summary
+          cat > config_stats.json << EOF
+          {
+            "resources": $RESOURCE_COUNT,
+            "data_sources": $DATA_COUNT,
+            "modules": $MODULE_COUNT,
+            "variables": $VARIABLE_COUNT,
+            "outputs": $OUTPUT_COUNT
+          }
+          EOF
+      
+      - name: 🧪 Terraform Plan Syntax Check
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "🧪 Testing plan generation (syntax check)..."
+          
+          # Try to generate a plan without applying
+          # This helps catch issues that validate might miss
+          if [[ -f "environments/${{ inputs.environment }}.tfvars" ]]; then
+            echo "📋 Testing plan with environment variables..."
+            terraform plan \
+              -var-file="environments/${{ inputs.environment }}.tfvars" \
+              -no-color \
+              -input=false \
+              -out=/dev/null > plan_test.txt 2>&1 || {
+                echo "⚠️ Plan generation failed - this might indicate configuration issues"
+                echo "Plan test output:"
+                cat plan_test.txt
+                # Don't fail the job, just warn
+              }
+          else
+            echo "⚠️ No environment-specific tfvars file found: environments/${{ inputs.environment }}.tfvars"
+            echo "Skipping plan syntax test"
+          fi
+      
+      - name: 📋 Generate Validation Summary
+        id: summary
+        run: |
+          echo "📋 Generating validation summary..."
+          
+          # Determine overall status
+          VALIDATION_STATUS="success"
+          
+          if [[ "${{ steps.tf-validate.outputs.tf_validate_status }}" != "success" ]]; then
+            VALIDATION_STATUS="failure"
+          fi
+          
+          if [[ "${{ inputs.check_formatting }}" == "true" && "${{ steps.format.outputs.format_issues }}" == "true" ]]; then
+            if [[ "$VALIDATION_STATUS" == "success" ]]; then
+              VALIDATION_STATUS="warning"
+            fi
+          fi
+          
+          echo "validation_status=$VALIDATION_STATUS" >> $GITHUB_OUTPUT
+          
+          # Create detailed summary
+          echo "## ✅ Terraform Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform Validate | ${{ steps.tf-validate.outputs.tf_validate_status == 'success' && '✅ Pass' || '❌ Fail' }} | Configuration syntax check |" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ inputs.check_formatting }}" == "true" ]]; then
+            FORMAT_STATUS="${{ steps.format.outputs.format_issues == 'false' && '✅ Pass' || '⚠️ Issues' }}"
+            echo "| Formatting | $FORMAT_STATUS | Code style consistency |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ inputs.run_security_scan }}" == "true" ]]; then
+            SECURITY_COUNT="${{ steps.security.outputs.security_issues }}"
+            SECURITY_STATUS="✅ Pass"
+            if [[ "$SECURITY_COUNT" != "0" && "$SECURITY_COUNT" != "unknown" ]]; then
+              SECURITY_STATUS="⚠️ $SECURITY_COUNT issues"
+            elif [[ "$SECURITY_COUNT" == "unknown" ]]; then
+              SECURITY_STATUS="⚠️ Check logs"
+            fi
+            echo "| Security Scan | $SECURITY_STATUS | Security best practices |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Add configuration stats if available
+          if [[ -f "${{ inputs.working_directory }}/config_stats.json" ]]; then
+            echo "### 📊 Configuration Statistics" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            STATS=$(cat "${{ inputs.working_directory }}/config_stats.json")
+            echo "- **Resources:** $(echo "$STATS" | jq -r '.resources')" >> $GITHUB_STEP_SUMMARY
+            echo "- **Data Sources:** $(echo "$STATS" | jq -r '.data_sources')" >> $GITHUB_STEP_SUMMARY
+            echo "- **Modules:** $(echo "$STATS" | jq -r '.modules')" >> $GITHUB_STEP_SUMMARY
+            echo "- **Variables:** $(echo "$STATS" | jq -r '.variables')" >> $GITHUB_STEP_SUMMARY
+            echo "- **Outputs:** $(echo "$STATS" | jq -r '.outputs')" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Overall status
+          if [[ "$VALIDATION_STATUS" == "success" ]]; then
+            echo "### ✅ Overall Status: PASS" >> $GITHUB_STEP_SUMMARY
+            echo "Configuration is valid and ready for planning/applying." >> $GITHUB_STEP_SUMMARY
+          elif [[ "$VALIDATION_STATUS" == "warning" ]]; then
+            echo "### ⚠️ Overall Status: PASS WITH WARNINGS" >> $GITHUB_STEP_SUMMARY
+            echo "Configuration is valid but has formatting or security recommendations." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Overall Status: FAIL" >> $GITHUB_STEP_SUMMARY
+            echo "Configuration has validation errors that must be fixed." >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: 📤 Upload Validation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-validation-${{ inputs.environment }}-${{ github.run_id }}
+          path: |
+            ${{ inputs.working_directory }}/validate_output.json
+            ${{ inputs.working_directory }}/tfsec_results.json
+            ${{ inputs.working_directory }}/checkov_results.json
+            ${{ inputs.working_directory }}/config_stats.json
+            ${{ inputs.working_directory }}/plan_test.txt
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: ✅ Validation Success
+        if: steps.summary.outputs.validation_status == 'success'
+        run: |
+          echo "✅ Terraform validation completed successfully!"
+          echo "🎯 Environment: ${{ inputs.environment }}"
+          echo "📁 Working Directory: ${{ inputs.working_directory }}"
+          echo "🔧 Terraform Version: ${{ inputs.terraform_version }}"
+          echo "🚀 Configuration is ready for deployment!"
+      
+      - name: ⚠️ Validation Warnings
+        if: steps.summary.outputs.validation_status == 'warning'
+        run: |
+          echo "⚠️ Terraform validation completed with warnings"
+          echo "🎯 Environment: ${{ inputs.environment }}"
+          echo "📋 Please review the warnings above"
+          echo "🔧 Consider fixing formatting or security issues"
+      
+      - name: ❌ Validation Failure
+        if: steps.summary.outputs.validation_status == 'failure'
+        run: |
+          echo "❌ Terraform validation failed!"
+          echo "🎯 Environment: ${{ inputs.environment }}"
+          echo "🔍 Check the validation errors above"
+          echo "🛠️ Fix the configuration issues before proceeding"
+          exit 1
