@@ -46,19 +46,6 @@ jobs:
       id-token: write
       contents: read
       
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-${{ github.run_id }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          
-      - name: Test AWS Access
-        run: |
-          aws sts get-caller-identity
-          echo "✅ OIDC authentication successful!"
-      
     environment: 
       name: ${{ inputs.environment }}
     outputs:
@@ -73,15 +60,6 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-      
-      # - name: 🔑 Configure AWS Credentials
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      #     mask-aws-account-id: false
-
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
