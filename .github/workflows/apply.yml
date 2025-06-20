@@ -131,14 +131,17 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-      
-      - name: 🔑 Configure AWS Credentials
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-          mask-aws-account-id: false
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+      
+      - name: Test AWS Access
+        run: |
+          aws sts get-caller-identity
+          echo "✅ OIDC authentication successful!"
       
       - name: 📥 Download Plan Artifact
         if: inputs.plan_artifact != ''
@@ -152,11 +155,10 @@ jobs:
         run: |
           echo "🏗️ Initializing Terraform..."
           terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
+            -backend-config="region=${{ secrets.AWS_REGION || 'us-east-1' }}" \
             -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
       
       - name: 📋 Create Fresh Plan (if no artifact)
         if: inputs.plan_artifact == ''

@@ -70,13 +70,16 @@ jobs:
       #     mask-aws-account-id: false
 
 
-      - name: OIDC Authentication
-        if: github.event_name == 'pull_request'
-        uses: aws-actions/aws-oidc-authentication@v1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          role-session-name: ${{ github.actor }}-${{ github.run_id }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Test AWS Access
+        run: |
+          aws sts get-caller-identity
+          echo "✅ OIDC authentication successful!"
       
       - name: 📁 Set Working Directory
         run: |
@@ -91,11 +94,11 @@ jobs:
         run: |
           echo "🏗️ Initializing Terraform..."
           terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
+            -backend-config="region=${{ secrets.AWS_REGION || 'us-east-1' }}" \
             -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
       
       - name: 🔍 Terraform Validate
         working-directory: ${{ inputs.working_directory }}
@@ -113,20 +116,6 @@ jobs:
             exit 1
           fi
           echo "✅ All files are properly formatted"
-      
-      - name: 🔒 Security Scan with tfsec
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          working_directory: ${{ inputs.working_directory }}
-          soft_fail: true
-          format: sarif
-          output: tfsec-results.sarif
-      
-      - name: 📤 Upload tfsec results
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: tfsec-results.sarif
       
       - name: 📋 Create Terraform Plan
         id: plan

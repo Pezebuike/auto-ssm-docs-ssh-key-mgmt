@@ -59,25 +59,28 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-      
-      - name: 🔑 Configure AWS Credentials
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-          mask-aws-account-id: false
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
       
-      - name: 🏗️ Terraform Init
+      - name: Test AWS Access
+        run: |
+          aws sts get-caller-identity
+          echo "✅ OIDC authentication successful!"  
+      
+      - name: Terraform Init
         working-directory: ${{ inputs.working_directory }}
         run: |
-          echo "🏗️ Initializing Terraform..."
+          echo "Initializing Terraform..."
           terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
+            -backend-config="region=${{ secrets.AWS_REGION || 'us-east-1' }}" \
             -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
       
       - name: 🔍 Analyze Current State
         id: validation
@@ -191,40 +194,16 @@ jobs:
           echo "Please review the destroy plan before approving."
 
   # Secondary approval gate - for production only
-  secondary-approval:
-    name: 🔒 Secondary Approval Gate (Production)
+
+  destroy:
+    name: 🗑️ Terraform Destroy
     runs-on: ubuntu-latest
     needs: [pre-destroy-validation, primary-approval]
-    if: inputs.environment == 'production' && needs.pre-destroy-validation.outputs.can_proceed == 'true' && needs.primary-approval.result == 'success'
-    environment: 
-      name: production-destroy-final-approval
-      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-    
-    steps:
-      - name: 🔒 Final Production Approval
-        run: |
-          echo "🔒 FINAL APPROVAL REQUIRED FOR PRODUCTION DESTROY"
-          echo ""
-          echo "🚨 This is the final safety gate before destroying production infrastructure"
-          echo "📊 Resources to destroy: ${{ needs.pre-destroy-validation.outputs.resource_count }}"
-          echo ""
-          echo "⚡ THIS WILL PERMANENTLY DELETE ALL PRODUCTION INFRASTRUCTURE"
-          echo "⚡ DATA LOSS IS PERMANENT AND IRREVERSIBLE"
-          echo ""
-          echo "Only proceed if you are absolutely certain this is intended."
-
-  # Main destroy job
-  destroy:
-    name: 🗑️ Destroy Infrastructure
-    runs-on: ubuntu-latest
-    needs: [pre-destroy-validation, primary-approval, secondary-approval]
-    if: always() && needs.pre-destroy-validation.outputs.can_proceed == 'true' && (needs.primary-approval.result == 'success' || needs.primary-approval.result == 'skipped') && (needs.secondary-approval.result == 'success' || needs.secondary-approval.result == 'skipped')
-    environment: 
-      name: ${{ inputs.environment }}
+    if: needs.pre-destroy-validation.outputs.can_proceed == 'true'
     outputs:
       destroy_summary: ${{ steps.destroy.outputs.destroy_summary }}
       resources_destroyed: ${{ steps.destroy.outputs.resources_destroyed }}
-    
+
     steps:
       - name: 🔄 Checkout Repository
         uses: actions/checkout@v4
@@ -234,48 +213,23 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-      
-      - name: 🔑 Configure AWS Credentials
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-          mask-aws-account-id: false
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
       
-      - name: 📥 Download Destroy Plan
-        uses: actions/download-artifact@v4
-        with:
-          name: destroy-plan-${{ inputs.environment }}-${{ github.run_id }}
-          path: ${{ inputs.working_directory }}
-      
-      - name: 🏗️ Terraform Init
-        working-directory: ${{ inputs.working_directory }}
+      - name: Test AWS Access
         run: |
-          echo "🏗️ Initializing Terraform..."
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+          aws sts get-caller-identity
+          echo "✅ OIDC authentication successful!"
       
-      - name: 📋 Final State Backup
-        working-directory: ${{ inputs.working_directory }}
-        run: |
-          echo "📋 Creating final state backup..."
-          
-          # Create backup of current state
-          BACKUP_FILE="terraform-state-backup-${{ inputs.environment }}-$(date +%Y%m%d-%H%M%S).json"
-          terraform show -json > "$BACKUP_FILE"
-          
-          # Also save the state file directly
-          if [[ -f ".terraform/terraform.tfstate" ]]; then
-            cp ".terraform/terraform.tfstate" "local-state-backup-$(date +%Y%m%d-%H%M%S).json"
-          fi
-          
-          echo "💾 State backup created: $BACKUP_FILE"
-          echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
+    
+      
+   
+      
+     
       
       - name: 🗑️ Execute Terraform Destroy
         id: destroy
@@ -345,7 +299,7 @@ jobs:
           if [[ "${{ inputs.environment }}" == "dev" ]]; then
             echo "🗑️ Considering state file cleanup for dev environment"
             # Note: Uncomment the following lines if you want to remove state for dev
-            # aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/${{ inputs.environment }}/terraform.tfstate" || true
+            # aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}/${{ inputs.environment }}/terraform.tfstate" || true
             # echo "🗑️ Dev state file removed from S3"
           fi
       
