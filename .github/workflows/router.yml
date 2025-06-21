@@ -10,10 +10,12 @@ on:
   workflow_dispatch:
     inputs:
       action:
+        description: 'Select the action to perform'
         type: choice
         options: [plan, apply, destroy]
         default: plan
       environment:
+        description: 'Select the environment'
         type: choice
         options: [dev, staging, prod]
         default: dev
@@ -36,7 +38,7 @@ jobs:
 
   apply:
     needs: validate
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
     uses: ./.github/workflows/apply.yml
     with:
       environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
