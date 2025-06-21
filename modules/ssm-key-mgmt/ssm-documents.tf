@@ -119,25 +119,25 @@ resource "aws_ssm_document" "add_ssh_key_automation" {
               "# Function to log messages",
               "log_info() {",
               "    if [[ \"$ENABLE_LOGGING\" == \"true\" ]]; then",
-              "        echo -e \"${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "        echo -e \"$${GREEN}[INFO]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "    fi",
               "}",
               "",
               "log_warn() {",
-              "    echo -e \"${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "    echo -e \"$${YELLOW}[WARN]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "}",
               "",
               "log_error() {",
-              "    echo -e \"${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "    echo -e \"$${RED}[ERROR]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "}",
               "",
               "log_debug() {",
               "    if [[ \"$LOG_LEVEL\" == \"DEBUG\" ]]; then",
-              "        echo -e \"${BLUE}[DEBUG]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "        echo -e \"$${BLUE}[DEBUG]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "    fi",
               "}",
               "",
-              "echo -e \"${GREEN}=== SSH Key Management Script Started ===${NC}\"",
+              "echo -e \"$${GREEN}=== SSH Key Management Script Started ===$${NC}\"",
               "log_info \"Target Username: $USERNAME\"",
               "log_info \"Create User: $CREATE_USER\"",
               "log_info \"Logging Enabled: $ENABLE_LOGGING\"",
@@ -234,7 +234,7 @@ resource "aws_ssm_document" "add_ssh_key_automation" {
             ], local.backup_cleanup_commands, [
               "",
               "# Verification",
-              "echo -e \"${GREEN}=== Verification Results ===${NC}\"",
+              "echo -e \"$${GREEN}=== Verification Results ===$${NC}\"",
               "echo \"SSH directory:\"",
               "ls -ld \"$SSH_DIR\"",
               "echo \"\"",
@@ -262,7 +262,7 @@ resource "aws_ssm_document" "add_ssh_key_automation" {
               "    exit 1",
               "fi",
               "",
-              "echo -e \"${GREEN}=== SSH Key Management Completed Successfully! ===${NC}\""
+              "echo -e \"$${GREEN}=== SSH Key Management Completed Successfully! ===$${NC}\""
             ])
             workingDirectory  = var.working_directory
             executionTimeout  = tostring(var.execution_timeout)
@@ -364,19 +364,19 @@ resource "aws_ssm_document" "remove_ssh_key_automation" {
               "# Logging functions",
               "log_info() {",
               "    if [[ \"$ENABLE_LOGGING\" == \"true\" ]]; then",
-              "        echo -e \"${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "        echo -e \"$${GREEN}[INFO]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "    fi",
               "}",
               "",
               "log_warn() {",
-              "    echo -e \"${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "    echo -e \"$${YELLOW}[WARN]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "}",
               "",
               "log_error() {",
-              "    echo -e \"${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
+              "    echo -e \"$${RED}[ERROR]$${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1\"",
               "}",
               "",
-              "echo -e \"${GREEN}=== SSH Key Removal Started ===${NC}\"",
+              "echo -e \"$${GREEN}=== SSH Key Removal Started ===$${NC}\"",
               ""
             ], local.remove_custom_commands, [
               "# Check sudo availability",
@@ -428,7 +428,7 @@ resource "aws_ssm_document" "remove_ssh_key_automation" {
               ""
             ], local.backup_cleanup_commands, [
               "",
-              "echo -e \"${GREEN}=== SSH Key Removal Completed ===${NC}\""
+              "echo -e \"$${GREEN}=== SSH Key Removal Completed ===$${NC}\""
             ])
             workingDirectory = var.working_directory
             executionTimeout = tostring(var.execution_timeout)
