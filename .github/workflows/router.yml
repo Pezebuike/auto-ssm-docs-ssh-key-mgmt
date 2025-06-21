@@ -53,19 +53,19 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
          
       # Apply-specific steps
-      - name: Create Backend Config
-        run: |
-          cat > backend.tf << EOF
-          terraform {
-            backend "s3" {
-              bucket         = "$BUCKET_TF_STATE"
-              key            = "${{ github.event.inputs.module }}/${{ github.event.inputs.resource_name }}.tfstate"
-              region         = "$aws_region"
+      # - name: Create Backend Config
+      #   run: |
+      #     cat > backend.tf << EOF
+      #     terraform {
+      #       backend "s3" {
+      #         bucket         = "$BUCKET_TF_STATE"
+      #         key            = "${{ github.event.inputs.module }}/${{ github.event.inputs.resource_name }}.tfstate"
+      #         region         = "$aws_region"
              
-            }
-          }
-          EOF
-        working-directory: modules/${{ github.event.inputs.module }}
+      #       }
+      #     }
+      #     EOF
+      #   working-directory: modules/${{ github.event.inputs.module }}
      
       - name: Terraform Init
         run: terraform init
