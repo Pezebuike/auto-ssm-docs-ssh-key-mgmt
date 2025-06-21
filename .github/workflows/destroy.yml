@@ -1,39 +1,100 @@
-name: Destroy
-
+name: Destroy Infrastructure
 on:
-  workflow_call:
-    inputs:
-      environment:
-        required: true
-        type: string
-
-permissions:
-  id-token: write
-  contents: read
-
+  workflow_dispatch:
+    # inputs:
+    #   module:
+    #     type: string
+    #     description: 'Module to destroy'
+    #     required: true
+    #   resource_name:
+    #     type: string
+    #     description: 'Name of the resource to destroy'
+    #     required: false
+    #     default: ''
+env:
+  aws_region: ${{ secrets.AWS_REGION }}
+  BUCKET_TF_STATE: ${{ secrets.BUCKET_TF_STATE }}
 jobs:
-  destroy:
+  destroy-infra:
+    name: "Destroy ${{ github.event.inputs.module }}"
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        shell: bash
+    environment:
+      name: ${{ github.event.inputs.module }}-${{ github.event.inputs.resource_name }}-destroy
+      url: ${{ steps.environment.outputs.environment_url }}
+   
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS
+      # Step 1: Checkout code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+     
+      # Step 2: Install Terraform
+      - name: Set Up Terraform
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+          sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+          sudo apt-get update -y
+          sudo apt-get install -y terraform
+     
+      # Step 3: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Delete Documents
+          aws-region: ${{ env.aws_region }}
+     
+      # Step 4: Create backend configuration
+      - name: Create Backend Configuration
         run: |
-          for file in *.yml; do
-            [ -f "$file" ] || continue
-            document_name=$(basename "$file" .yml)
-            
-            if aws ssm describe-document --name "$document_name" >/dev/null 2>&1; then
-              echo "Deleting $document_name"
-              aws ssm delete-document --name "$document_name"
-            else
-              echo "Document $document_name does not exist"
-            fi
-          done
+          cat > backend.tf << EOF
+          terraform {
+            backend "s3" {
+              bucket         = "$BUCKET_TF_STATE"
+              key            = "${{ github.event.inputs.module }}/${{ github.event.inputs.resource_name }}.tfstate"
+              region         = "$aws_region"
+              encryption     = true
+             
+            }
+          }
+          EOF
+        working-directory: modules/${{ github.event.inputs.module }}
+     
+      # Step 5: Initialize Terraform
+      - name: Initialize Terraform
+        id: init
+        working-directory: modules/${{ github.event.inputs.module }}
+        run: |
+          terraform init -backend-config="bucket=${{ env.BUCKET_TF_STATE }}" \
+            -backend-config="key=${{ github.event.inputs.module }}/${{ github.event.inputs.resource_name }}.tfstate" \
+            -backend-config="region=${{ env.aws_region }}" \
+            -backend-config="skip_credentials_validation=true"
+     
+      # Step 6: Plan Terraform destroy
+      - name: Plan Terraform Destroy
+        id: plan
+        working-directory: modules/${{ github.event.inputs.module }}
+        run: |
+          terraform plan -destroy -var-file="${{ github.event.inputs.module }}.tfvars" -lock=false -input=false -no-color -out destroyfile
+        continue-on-error: true
+     
+      # Step 7: Check if plan failed
+      - name: Terraform Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+     
+      # Step 8: Apply the Terraform destroy
+      - name: Destroy Terraform Infrastructure
+        working-directory: modules/${{ github.event.inputs.module }}
+        run: |
+          terraform apply -auto-approve destroyfile
+     
+      # Step 9: Output destruction info
+      - name: Output Destruction Info
+        run: |
+          echo "environment_url=https://console.aws.amazon.com/console/home?region=${{ env.aws_region }}" >> $GITHUB_OUTPUT
+          echo "Successfully destroyed ${{ github.event.inputs.module }} - ${{ github.event.inputs.resource_name }}"
+        id: environment

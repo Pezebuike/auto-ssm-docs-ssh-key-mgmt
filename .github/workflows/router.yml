@@ -1,52 +1,186 @@
-name: SSM Router
-
+name: Infrastructure Management Router
 on:
-  push:
-    branches: [main, develop]
-    paths: ['*.yml']
-  pull_request:
-    branches: [main]
-    paths: ['*.yml']
   workflow_dispatch:
     inputs:
       action:
-        description: 'Select the action to perform'
         type: choice
-        options: [plan, apply, destroy]
-        default: plan
-      environment:
-        description: 'Select the environment'
+        description: 'Action to perform'
+        required: true
+        options:
+          - apply
+          - destroy
+      module:
         type: choice
-        options: [dev, staging, prod]
-        default: dev
+        description: 'Module to manage'
+        required: true
+        options:
+          - alb
+          - eks
+          - ec2
+          - security_group
+          - vpc
+      resource_name:
+        type: string
+        description: 'Name of the resource'
+        required: False
+        default: ''
+      run_post_deploy:
+        type: choice
+        description: 'Run post-deployment script (for EKS only)'
+        required: true
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
+      run_ingress_test:
+        type: choice
+        description: 'Run ingress testing script (for EKS only)'
+        required: true
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write
+   
+env:
+  TF_PLAN_FILE: ${{ github.sha }}.tfplan
+  aws_region: ${{ secrets.AWS_REGION }}
+  BUCKET_TF_STATE: ${{ secrets.BUCKET_TF_STATE }}
+ 
 
 jobs:
-  validate:
-    uses: ./.github/workflows/validate.yml
+  manage-infrastructure:
+    name: "${{ github.event.inputs.action }} ${{ github.event.inputs.module }}"
+    runs-on: ubuntu-latest
+    steps:
+      # Common steps
+      - name: Checkout Code
+        uses: actions/checkout@v4
+     
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.7
+     
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+         
+      # Apply-specific steps
+      - name: Create Backend Config
+        run: |
+          cat > backend.tf << EOF
+          terraform {
+            backend "s3" {
+              bucket         = "$BUCKET_TF_STATE"
+              key            = "${{ github.event.inputs.module }}/${{ github.event.inputs.resource_name }}.tfstate"
+              region         = "$aws_region"
+             
+            }
+          }
+          EOF
+        working-directory: modules/${{ github.event.inputs.module }}
+     
+      - name: Terraform Init
+        run: terraform init
+        working-directory: modules/${{ github.event.inputs.module }}
+       
+      # Conditional Apply steps
+      - name: Terraform Plan (Apply)
+        if: github.event.inputs.action == 'apply'
+        run: terraform plan -out ${{ env.TF_PLAN_FILE }} -var-file="${{ github.event.inputs.module }}.tfvars"
+        working-directory: modules/${{ github.event.inputs.module }}
+       
+      # Conditional Destroy steps  
+      - name: Terraform Plan (Destroy)
+        if: github.event.inputs.action == 'destroy'
+        run: terraform plan -destroy -out ${{ env.TF_PLAN_FILE }} -var-file="${{ github.event.inputs.module }}.tfvars"
+        working-directory: modules/${{ github.event.inputs.module }}
+       
+      # Apply with approval
+      - name: Terraform Apply
+        if: success()
+        run: terraform apply -auto-approve ${{ env.TF_PLAN_FILE }}
+        working-directory: modules/${{ github.event.inputs.module }}
 
-  plan:
-    needs: validate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan')
-    uses: ./.github/workflows/plan.yml
-    with:
-      environment: ${{ github.event.inputs.environment || 'dev' }}
-    secrets: inherit
+      # Display output file content and save to terraform outputs
+      - name: Display and Save Output Files
+        if: success() && github.event.inputs.action == 'apply'
+        run: |
+          echo "Checking for output files in multiple locations..."
+          
+          # Check in the current directory
+          if [ -d "./outputs" ]; then
+            echo "Found outputs directory in current path. Contents:"
+            ls -la ./outputs
+            
+            if [ -f "./outputs/vpc_info.txt" ]; then
+              echo "====== Contents of vpc_info.txt ======"
+              cat ./outputs/vpc_info.txt
+              echo "====== End of vpc_info.txt ======"
+              
+              # Save the vpc_info.txt content as a step output
+              echo "VPC_INFO<<EOF" >> $GITHUB_ENV
+              cat ./outputs/vpc_info.txt >> $GITHUB_ENV
+              echo "EOF" >> $GITHUB_ENV
+            fi
+          fi
 
-  apply:
-    needs: validate
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
-    uses: ./.github/workflows/apply.yml
-    with:
-      environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
-    secrets: inherit
 
-  destroy:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
-    uses: ./.github/workflows/destroy.yml
-    with:
-      environment: ${{ github.event.inputs.environment || 'dev' }}
-    secrets: inherit
+# name: SSM Router
+
+# on:
+#   push:
+#     branches: [main, develop]
+#     paths: ['*.yml']
+#   pull_request:
+#     branches: [main]
+#     paths: ['*.yml']
+#   workflow_dispatch:
+#     inputs:
+#       action:
+#         description: 'Select the action to perform'
+#         type: choice
+#         options: [plan, apply, destroy]
+#         default: plan
+#       environment:
+#         description: 'Select the environment'
+#         type: choice
+#         options: [dev, staging, prod]
+#         default: dev
+
+# permissions:
+#   id-token: write
+#   contents: read
+
+# jobs:
+#   validate:
+#     uses: ./.github/workflows/validate.yml
+
+#   plan:
+#     needs: validate
+#     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan')
+#     uses: ./.github/workflows/plan.yml
+#     with:
+#       environment: ${{ github.event.inputs.environment || 'dev' }}
+#     secrets: inherit
+
+#   apply:
+#     needs: validate
+#     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+#     uses: ./.github/workflows/apply.yml
+#     with:
+#       environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+#     secrets: inherit
+
+#   destroy:
+#     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+#     uses: ./.github/workflows/destroy.yml
+#     with:
+#       environment: ${{ github.event.inputs.environment || 'dev' }}
+#     secrets: inherit
