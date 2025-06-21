@@ -1,4 +1,4 @@
-name: Infrastructure Management Router
+name: Router
 on:
   workflow_dispatch:
     inputs:

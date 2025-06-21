@@ -1,4 +1,4 @@
-name: Apply Infrastructure
+name: Apply
 on:
   workflow_dispatch:
     # inputs:
