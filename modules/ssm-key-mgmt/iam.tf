@@ -1,13 +1,12 @@
 # Data source for current AWS account
 data "aws_caller_identity" "current" {}
 
-# Data source for current AWS region
+# Data source for current AWS region  
 data "aws_region" "current" {}
 
 # IAM Role for SSM Automation Document execution
 resource "aws_iam_role" "ssm_automation_execution_role" {
   name = var.iam_role_name
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -25,7 +24,6 @@ resource "aws_iam_role" "ssm_automation_execution_role" {
       }
     ]
   })
-
   tags = merge(
     var.common_tags,
     var.iam_role_tags,
@@ -40,7 +38,6 @@ resource "aws_iam_role" "ssm_automation_execution_role" {
 resource "aws_iam_role_policy" "ssm_automation_policy" {
   name = var.iam_policy_name
   role = aws_iam_role.ssm_automation_execution_role.id
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = concat([
@@ -48,7 +45,7 @@ resource "aws_iam_role_policy" "ssm_automation_policy" {
         Effect = "Allow"
         Action = [
           "ssm:SendCommand",
-          "ssm:ListCommands",
+          "ssm:ListCommands", 
           "ssm:ListCommandInvocations",
           "ssm:DescribeInstanceInformation",
           "ssm:GetCommandInvocation",
@@ -62,7 +59,7 @@ resource "aws_iam_role_policy" "ssm_automation_policy" {
         Effect = "Allow"
         Action = [
           "ec2:DescribeInstances",
-          "ec2:DescribeInstanceStatus",
+          "ec2:DescribeInstanceStatus", 
           "ec2:DescribeInstanceAttribute"
         ]
         Resource = "*"
@@ -81,13 +78,13 @@ resource "aws_iam_role_policy" "ssm_automation_policy" {
         Effect = "Allow"
         Action = [
           "logs:CreateLogGroup",
-          "logs:CreateLogStream",
+          "logs:CreateLogStream", 
           "logs:PutLogEvents",
           "logs:DescribeLogGroups",
           "logs:DescribeLogStreams"
         ]
         Resource = [
-          "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/ssm/*"
+          "arn:aws:logs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:log-group:/aws/ssm/*"
         ]
       }
     ], var.custom_iam_policy_statements)
