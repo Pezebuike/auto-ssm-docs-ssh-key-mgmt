@@ -1,106 +1,50 @@
-# .github/workflows/terraform-router.yml
-name: Terraform Router
+name: SSM Router
 
 on:
+  push:
+    branches: [main, develop]
+    paths: ['*.yml']
+  pull_request:
+    branches: [main]
+    paths: ['*.yml']
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Environment'
-        required: true
-        default: 'dev'
-        type: choice
-        options:
-          - dev
-          - staging
-          - prod
-      
       action:
-        description: 'Terraform Action'
-        required: true
-        default: 'plan'
         type: choice
-        options:
-          - plan
-          - apply
-          - destroy
-
-
-      modules:
-        description: 'Terraform Module (optional, used for plan/apply actions)'
-        required: true
-        default: ''
+        options: [plan, apply, destroy]
+        default: plan
+      environment:
         type: choice
-        options:
-          - ssm-key-mgmt
-          
-      
-      confirm_destroy:
-        description: 'Type "destroy" to confirm destruction (required for destroy action)'
-        required: false
-        type: string
+        options: [dev, staging, prod]
+        default: dev
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  # Job 1: Validate inputs and setup
   validate:
-    name: Validate Inputs
-    runs-on: ubuntu-latest
-    
-    outputs:
-      environment: ${{ github.event.inputs.environment }}
-      action: ${{ github.event.inputs.action }}
-      confirm_destroy: ${{ github.event.inputs.confirm_destroy }}
-    
-    steps:
-      - name: Validate Destroy Confirmation
-        if: github.event.inputs.action == 'destroy'
-        run: |
-          if [[ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]]; then
-            echo "❌ Destroy action requires confirmation. You must type 'destroy' in the confirm_destroy field."
-            exit 1
-          fi
-          echo "✅ Destroy confirmation validated"
+    uses: ./.github/workflows/validate.yml
 
-      - name: Display Action Summary
-        run: |
-          echo "🎯 Router Workflow Starting"
-          echo "Environment: ${{ github.event.inputs.environment }}"
-          echo "Action: ${{ github.event.inputs.action }}"
-          echo "Triggered by: @${{ github.actor }}"
-
-  # Job 2: Route to Plan workflow
-  route-to-plan:
-    name: Execute Plan
+  plan:
     needs: validate
-    if: github.event.inputs.action == 'plan'
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan')
     uses: ./.github/workflows/plan.yml
     with:
-      environment: ${{ needs.validate.outputs.environment }}
+      environment: ${{ github.event.inputs.environment || 'dev' }}
     secrets: inherit
 
-  # Job 3: Route to Apply workflow
-  route-to-apply:
-    name: Execute Apply
+  apply:
     needs: validate
-    if: github.event.inputs.action == 'apply'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
     uses: ./.github/workflows/apply.yml
     with:
-      environment: ${{ needs.validate.outputs.environment }}
+      environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
     secrets: inherit
 
-  # Job 4: Route to Destroy workflow
-  route-to-destroy:
-    name: Execute Destroy
-    needs: validate
-    if: github.event.inputs.action == 'destroy'
+  destroy:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
     uses: ./.github/workflows/destroy.yml
     with:
-      environment: ${{ needs.validate.outputs.environment }}
+      environment: ${{ github.event.inputs.environment || 'dev' }}
     secrets: inherit
-
-  # Job 5: Summary and notification
-  
-
