@@ -14,11 +14,7 @@ on:
         description: 'Module to manage'
         required: true
         options:
-          - alb
-          - eks
-          - ec2
-          - security_group
-          - vpc
+          - ssm-ssh-key-mgmt
       resource_name:
         type: string
         description: 'Name of the resource'
