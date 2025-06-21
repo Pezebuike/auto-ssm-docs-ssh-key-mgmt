@@ -20,22 +20,7 @@ on:
         description: 'Name of the resource'
         required: False
         default: ''
-      run_post_deploy:
-        type: choice
-        description: 'Run post-deployment script (for EKS only)'
-        required: true
-        options:
-          - 'false'
-          - 'true'
-        default: 'false'
-      run_ingress_test:
-        type: choice
-        description: 'Run ingress testing script (for EKS only)'
-        required: true
-        options:
-          - 'false'
-          - 'true'
-        default: 'false'
+      
 
 permissions:
   contents: read
